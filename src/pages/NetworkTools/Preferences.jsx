@@ -1,9 +1,13 @@
 import { useState, useEffect } from 'react';
-import { useSupabase } from '../../context/SupabaseContext';
 import { useLocalStorage } from '../../hooks/useLocalStorage';
 
+function getSid() {
+  let sid = localStorage.getItem('superapp-session-id');
+  if (!sid) { sid = crypto.randomUUID(); localStorage.setItem('superapp-session-id', sid); }
+  return sid;
+}
+
 export default function Preferences() {
-  const { supabase, session, configured } = useSupabase();
   const [prefs, setPrefs] = useLocalStorage('superapp-preferences', {
     defaultPingCount: 4,
     defaultPortScanRange: 'common',
@@ -13,30 +17,30 @@ export default function Preferences() {
     sslExpiryWarningDays: 30,
   });
   const [saved, setSaved] = useState(false);
-  const userId = session?.user?.id;
 
   useEffect(() => {
-    if (!configured || !userId) return;
-    supabase.from('user_preferences').select('data').eq('user_id', userId).single().then(({ data }) => {
-      if (data?.data) setPrefs({ ...prefs, ...data.data });
-    }).catch(() => {});
-  }, [configured, userId]);
+    const sid = getSid();
+    fetch(`/api/db/user_preferences?session_id=${encodeURIComponent(sid)}`)
+      .then(r => r.json())
+      .then(({ rows }) => {
+        if (rows?.length > 0 && rows[0].data) {
+          setPrefs(p => ({ ...p, ...rows[0].data }));
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   const savePrefs = async () => {
     setPrefs(prefs);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
-
-    if (!configured || !userId) return;
     try {
-      const { data: existing } = await supabase.from('user_preferences').select('id').eq('user_id', userId).single();
-      const record = { user_id: userId, data: prefs, updated_at: new Date().toISOString() };
-      if (existing) {
-        await supabase.from('user_preferences').update(record).eq('id', existing.id);
-      } else {
-        record.created_at = new Date().toISOString();
-        await supabase.from('user_preferences').insert(record);
-      }
+      const sid = getSid();
+      await fetch('/api/db/user_preferences/upsert', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sid, data: prefs }),
+      });
     } catch {}
   };
 
@@ -107,16 +111,16 @@ export default function Preferences() {
           <button className="btn-primary" onClick={savePrefs}>
             {saved ? '✅ Saved!' : '💾 Save Preferences'}
           </button>
-          {saved && <span style={{ fontSize: 13, color: 'var(--success)' }}>Preferences saved to {configured ? 'Supabase' : 'localStorage'}</span>}
+          {saved && <span style={{ fontSize: 13, color: 'var(--success)' }}>Preferences saved to PostgreSQL</span>}
         </div>
       </div>
 
       <div className="card">
         <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>📊 Storage Info</h3>
         <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
-          <p>Supabase: {configured ? '✅ Connected' : '❌ Not configured (using localStorage)'}</p>
-          <p>Session: {session ? `Active (${session.user.id.slice(0, 8)}...)` : 'Anonymous'}</p>
-          <p>History is synced across sessions via Supabase when available.</p>
+          <p>Database: ✅ PostgreSQL via backend API</p>
+          <p>Session: {getSid().slice(0, 8)}...</p>
+          <p>History is synced across sessions via PostgreSQL.</p>
         </div>
       </div>
     </div>

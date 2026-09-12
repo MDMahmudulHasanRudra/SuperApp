@@ -5,12 +5,16 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "preview": "vite preview",
     "start": "node backend/server.js",
+    "dev:backend": "node backend/server.js",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "docker:up": "docker compose up -d --build",
+    "docker:down": "docker compose down",
+    "docker:reset": "docker compose down -v && docker compose up -d --build",
+    "docker:logs": "docker compose logs -f app"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.108.2",
     "axios": "^1.18.1",
     "cors": "^2.8.5",
     "express": "^4.18.2",
@@ -21,6 +25,7 @@
     "multer": "^2.2.0",
     "net-snmp": "^3.26.1",
     "pdfjs-dist": "^6.1.200",
+    "pg": "^8.23.0",
     "qrcode.react": "^4.2.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",

@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { useSupabase } from '../../context/SupabaseContext';
-import { useLocalStorage } from '../../hooks/useLocalStorage';
+import { useDbStorage } from '../../hooks/useDbStorage';
 import { pingTarget, checkHTTPHeaders, checkSSLCert } from '../../utils/api';
 import LoadingSpinner from '../../components/common/LoadingSpinner';
 import ErrorMessage from '../../components/common/ErrorMessage';
@@ -107,9 +106,14 @@ function cmdSimulateARP() {
   return '\n  Internet Address      Physical Address      Type\n  192.168.1.1           00-14-22-01-23-45     dynamic\n  192.168.1.102         00-1a-2b-3c-4d-5e     dynamic\n  224.0.0.2             01-00-5e-00-00-02     static\n  239.255.255.250       01-00-5e-7f-ff-fa     static\n';
 }
 
+function getSid() {
+  let sid = localStorage.getItem('superapp-session-id');
+  if (!sid) { sid = crypto.randomUUID(); localStorage.setItem('superapp-session-id', sid); }
+  return sid;
+}
+
 export default function NetworkDashboard() {
-  const { supabase, session, configured } = useSupabase();
-  const [targets, setTargets] = useLocalStorage('superapp-dashboard-targets', []);
+  const [targets, setTargets] = useDbStorage('dashboard_targets', 'superapp-dashboard-targets', []);
   const [checks, setChecks] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -117,7 +121,6 @@ export default function NetworkDashboard() {
   const [newType, setNewType] = useState('http');
   const [isSimulated, setIsSimulated] = useState(false);
   const intervalRef = useRef(null);
-  const userId = session?.user?.id;
 
   const [cmdTarget, setCmdTarget] = useState('');
   const [cmdOutput, setCmdOutput] = useState('');
@@ -159,21 +162,16 @@ export default function NetworkDashboard() {
       results.push(result);
     }
     setChecks(results);
-    if (configured && userId) {
-      try {
-        const rows = results.map(r => ({ target: r.target, type: r.type, status: r.status, latency_ms: r.latency_ms, checked_at: r.checked_at, session_id: userId }));
-        await supabase.from('network_checks').insert(rows);
-      } catch {}
-    }
-  }, [targets, isSimulated, configured, userId, supabase]);
-
-  useEffect(() => {
-    if (!configured || !userId) return;
-    const sub = supabase.channel('network_checks_changes').on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'network_checks', filter: `session_id=eq.${userId}` }, (payload) => {
-      setChecks(prev => { const i = prev.findIndex(c => c.target === payload.new.target && c.type === payload.new.type); if (i >= 0) { const u = [...prev]; u[i] = payload.new; return u; } return [payload.new, ...prev]; });
-    }).subscribe();
-    return () => { supabase.removeChannel(sub); };
-  }, [configured, userId, supabase]);
+    try {
+      const sid = getSid();
+      const rows = results.map(r => ({ target: r.target, type: r.type, status: r.status, latency_ms: r.latency_ms, checked_at: r.checked_at, session_id: sid }));
+      await fetch('/api/db/network_checks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(rows),
+      });
+    } catch {}
+  }, [targets, isSimulated]);
 
   const startPolling = () => { if (intervalRef.current) return; runAllChecks(); intervalRef.current = setInterval(runAllChecks, 30000); };
   const stopPolling = () => { if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null; } };

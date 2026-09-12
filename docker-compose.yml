@@ -1,0 +1,50 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    # Bound to localhost only, so `npm run dev:backend` on the host can reach the
+    # same database. Not reachable from the network.
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      POSTGRES_USER: superapp
+      POSTGRES_PASSWORD: superapp_secret
+      POSTGRES_DB: superapp
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Runs only on first boot of an empty volume. Recreate with:
+      #   docker compose down -v && docker compose up -d --build
+      - ./db/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U superapp -d superapp"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Serves the built React frontend AND the /api routes on one port.
+  # The app is reachable at http://localhost:12000
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    restart: unless-stopped
+    ports:
+      - "12000:12000"
+    environment:
+      PORT: 12000
+      NODE_ENV: production
+      DATABASE_URL: postgresql://superapp:superapp_secret@postgres:5432/superapp
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - internal
+
+volumes:
+  postgres_data:
+
+networks:
+  internal:
+    driver: bridge

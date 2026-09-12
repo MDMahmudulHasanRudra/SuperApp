@@ -1,6 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import * as XLSX from 'xlsx-js-style';
-import { useSupabase } from '../../context/SupabaseContext';
 import { useLocalStorage } from '../../hooks/useLocalStorage';
 
 const STEPS = [
@@ -222,9 +221,14 @@ function validateCellValue(value, rule) {
   return true;
 }
 
+function getSid() {
+  let sid = localStorage.getItem('superapp-session-id');
+  if (!sid) { sid = crypto.randomUUID(); localStorage.setItem('superapp-session-id', sid); }
+  return sid;
+}
+
 export default function SmartFill() {
-  const { supabase, session, configured } = useSupabase();
-  const userId = session?.user?.id;
+  const configured = true;
 
   const [_sessions, setSessions] = useLocalStorage('superapp-smartfill-sessions', {});
   const [sessionId] = useState(() => crypto.randomUUID());
@@ -291,33 +295,22 @@ export default function SmartFill() {
       return { ...prev, [sessionId]: { ...existing, ...updates, updatedAt: new Date().toISOString() } };
     });
 
-    if (configured && userId) {
+    if (configured) {
       try {
-        const { data: existing } = await supabase
-          .from('data_sessions')
-          .select('id')
-          .eq('session_id', sessionId)
-          .eq('user_id', userId)
-          .maybeSingle();
-
-        const record = {
-          session_id: sessionId,
-          user_id: userId,
-          ...updates,
-          updated_at: new Date().toISOString(),
-        };
-
-        if (existing) {
-          await supabase.from('data_sessions').update(record).eq('id', existing.id);
-        } else {
-          record.created_at = new Date().toISOString();
-          await supabase.from('data_sessions').insert(record);
-        }
-    } catch (e) {
-      if (e.code !== '42P01') console.error('DB save error:', e);
+        const res = await fetch('/api/db/data_sessions/upsert', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: sessionId,
+            data: { session_id: sessionId, ...updates, updated_at: new Date().toISOString() },
+          }),
+        });
+        if (!res.ok) throw new Error(res.statusText);
+      } catch (e) {
+        console.error('DB save error:', e);
+      }
     }
-    }
-  }, [configured, userId, supabase, sessionId, setSessions]);
+  }, [configured, sessionId, setSessions]);
 
   const resetAll = async () => {
     setStep('upload-template');
@@ -352,9 +345,11 @@ export default function SmartFill() {
     setBulkFillStart('1');
     setClearAfterExport(false);
 
-    if (configured && userId) {
+    if (configured) {
       try {
-        await supabase.from('data_sessions').delete().eq('session_id', sessionId).eq('user_id', userId);
+        await fetch(`/api/db/data_sessions?session_id=${encodeURIComponent(sessionId)}`, {
+          method: 'DELETE',
+        });
       } catch { }
     }
   };
@@ -1048,9 +1043,12 @@ export default function SmartFill() {
             </button>
             <button onClick={async () => {
               if (!confirm('Clear all database sessions?')) return;
-              if (configured && userId) {
+              if (configured) {
                 try {
-                  await supabase.from('data_sessions').delete().eq('user_id', userId);
+                  const sid = getSid();
+                  await fetch(`/api/db/data_sessions?session_id=${encodeURIComponent(sid)}`, {
+                    method: 'DELETE',
+                  });
                   showNotif('Database cleared');
                 } catch { showNotif('Failed to clear DB', 'error'); }
               }

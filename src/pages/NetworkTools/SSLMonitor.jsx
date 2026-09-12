@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { checkSSLCert } from '../../utils/api';
-import { useSupabaseStorage } from '../../hooks/useSupabaseStorage';
+import { useDbStorage } from '../../hooks/useDbStorage';
 import LoadingSpinner from '../../components/common/LoadingSpinner';
 import ErrorMessage from '../../components/common/ErrorMessage';
 import CopyButton from '../../components/common/CopyButton';
@@ -15,7 +15,7 @@ export default function SSLMonitor() {
   const [sortAsc, setSortAsc] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [expandedDomain, setExpandedDomain] = useState(null);
-  const [certificates, setCertificates] = useSupabaseStorage('ssl_certificates', 'superapp-ssl-certificates', []);
+  const [certificates, setCertificates] = useDbStorage('ssl_certificates', 'superapp-ssl-certificates', []);
   const [thresholds, setThresholds] = useState(() => {
     try { return JSON.parse(localStorage.getItem('superapp-ssl-thresholds') || '{"warning":30,"error":7}'); } catch { return { warning: 30, error: 7 }; }
   });

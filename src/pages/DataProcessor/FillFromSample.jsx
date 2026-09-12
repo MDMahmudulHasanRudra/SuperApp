@@ -1,6 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import * as XLSX from 'xlsx-js-style';
-import { useSupabase } from '../../context/SupabaseContext';
 import { useLocalStorage } from '../../hooks/useLocalStorage';
 
 const STEPS = [
@@ -29,10 +28,15 @@ const BULK_PATTERNS = [
   { key: 'formula', label: 'Formula (A1+1)' },
 ];
 
+function getSid() {
+  let sid = localStorage.getItem('superapp-session-id');
+  if (!sid) { sid = crypto.randomUUID(); localStorage.setItem('superapp-session-id', sid); }
+  return sid;
+}
+
 export default function FillFromSample() {
-  const { supabase, session, configured } = useSupabase();
-  const userId = session?.user?.id;
   const sessionIdRef = useRef(null);
+  const configured = true;
 
   const [_sessions, setSessions] = useLocalStorage('superapp-data-sessions', {});
   const [currentSession, setCurrentSession] = useState(null);
@@ -87,37 +91,22 @@ export default function FillFromSample() {
 
     setCurrentSession(prev => ({ ...prev, ...updates }));
 
-    if (configured && userId) {
+    if (configured) {
       try {
-        const { data: existing } = await supabase
-          .from('data_sessions')
-          .select('id')
-          .eq('session_id', sid)
-          .eq('user_id', userId)
-          .maybeSingle();
-
-        const record = {
-          session_id: sid,
-          user_id: userId,
-          ...updates,
-          updated_at: new Date().toISOString(),
-        };
-
-        if (existing) {
-          await supabase.from('data_sessions').update(record).eq('id', existing.id);
-        } else {
-          record.created_at = new Date().toISOString();
-          await supabase.from('data_sessions').insert(record);
-        }
+        const res = await fetch('/api/db/data_sessions/upsert', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: sid,
+            data: { session_id: sid, ...updates, updated_at: new Date().toISOString() },
+          }),
+        });
+        if (!res.ok) throw new Error(res.statusText);
       } catch (err) {
-        if (err.code === '42P01') {
-          console.warn('data_sessions table missing, skipping DB save');
-        } else {
-          console.error('DB save error:', err);
-        }
+        console.error('DB save error:', err);
       }
     }
-  }, [configured, userId, supabase, setSessions]);
+  }, [configured, setSessions]);
 
   const startNewSession = () => {
     const sid = crypto.randomUUID();
@@ -650,9 +639,11 @@ export default function FillFromSample() {
       return rest;
     });
 
-    if (configured && userId) {
+    if (configured) {
       try {
-        await supabase.from('data_sessions').delete().eq('session_id', sid).eq('user_id', userId);
+        await fetch(`/api/db/data_sessions?session_id=${encodeURIComponent(sid)}`, {
+          method: 'DELETE',
+        });
       } catch { }
     }
 
@@ -800,9 +791,12 @@ export default function FillFromSample() {
             }}>🔄 New Session</button>
             <button onClick={async () => {
               if (!confirm('Clear all database sessions for this user?')) return;
-              if (configured && userId) {
+              if (configured) {
                 try {
-                  await supabase.from('data_sessions').delete().eq('user_id', userId);
+                  const sid = getSid();
+                  await fetch(`/api/db/data_sessions?session_id=${encodeURIComponent(sid)}`, {
+                    method: 'DELETE',
+                  });
                   showNotif('Database cleared', 'success');
                 } catch { showNotif('Failed', 'error'); }
               } else {

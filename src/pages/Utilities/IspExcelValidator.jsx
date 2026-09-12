@@ -1,8 +1,14 @@
 import { useState, useRef, useCallback, useMemo, useEffect } from 'react';
 import axios from 'axios';
-import { useSupabase } from '../../context/SupabaseContext';
 
-const API_BASE = (import.meta.env.DEV ? (import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001') : '');
+function getSid() {
+  let sid = localStorage.getItem('superapp-session-id');
+  if (!sid) { sid = crypto.randomUUID(); localStorage.setItem('superapp-session-id', sid); }
+  return sid;
+}
+
+// Same-origin: vite proxies /api in dev, Express serves it in production.
+const API_BASE = '';
 
 const ADMIN_COLUMNS = [
   'Name', 'Mobile', 'Email', 'NationalId', 'Address', 'Zone', 'Conn.Type',
@@ -22,7 +28,7 @@ const MAC_COLUMNS = [
 const FROZEN_COLS = 4;
 
 export default function IspExcelValidator() {
-  const { supabase, configured: supabaseConfigured, session } = useSupabase();
+  const historyEnabled = true;
 
   const [file, setFile] = useState(null);
   const [templateType, setTemplateType] = useState('admin');
@@ -55,16 +61,18 @@ export default function IspExcelValidator() {
   const searchRef = useRef(null);
 
   useEffect(() => {
-    if (supabaseConfigured && supabase) {
-      supabase.from('isp_validations')
-        .select('id, template_type, file_name, total_rows, error_count, warning_count, valid_count, auto_fix_count, created_at')
-        .order('created_at', { ascending: false })
-        .limit(20)
-        .then(({ data, error: err }) => {
-          if (!err && data) setHistory(data);
-        });
-    }
-  }, [supabaseConfigured, supabase]);
+    const sid = getSid();
+    fetch(`/api/db/isp_validations?session_id=${encodeURIComponent(sid)}`)
+      .then(r => r.json())
+      .then(({ rows }) => {
+        if (rows) setHistory(rows.map(r => ({
+          id: r.id, template_type: r.template_type, file_name: r.file_name,
+          total_rows: r.total_rows, error_count: r.error_count, warning_count: r.warning_count,
+          valid_count: r.valid_count, auto_fix_count: r.auto_fix_count, created_at: r.created_at,
+        })));
+      })
+      .catch(() => {});
+  }, []);
 
   const columns = templateType === 'admin' ? ADMIN_COLUMNS : MAC_COLUMNS;
   const currentData = editedData || validation?.data || [];
@@ -166,65 +174,47 @@ export default function IspExcelValidator() {
     setValidationRecordId(null);
 
     try {
-      let validationResult;
-
-      if (supabaseConfigured && supabase) {
-        // Upload to Supabase Storage first (bypasses Vercel 4.5MB body limit)
-        const fileExt = file.name.split('.').pop();
-        const filePath = `isp-uploads/${Date.now()}_${file.name}`;
-        const { error: uploadError } = await supabase.storage
-          .from('isp-uploads')
-          .upload(filePath, file, { upsert: false });
-
-        if (uploadError) throw new Error(`Storage upload failed: ${uploadError.message}`);
-
-        const { data: { publicUrl } } = supabase.storage
-          .from('isp-uploads')
-          .getPublicUrl(filePath);
-
-        // Send URL to API for validation
-        const { data } = await axios.post(`${API_BASE}/api/isp/validate-from-url`, {
-          fileUrl: publicUrl,
-          templateType,
-        });
-        validationResult = data;
-
-        // Save to history
-        const validCount = data.data ? data.data.length - data.errors.filter(e => e.row).length : 0;
-        const { data: savedRecord, error: saveError } = await supabase.from('isp_validations').insert({
-          template_type: templateType,
-          file_name: file.name,
-          file_url: publicUrl,
-          total_rows: data.data?.length || 0,
-          error_count: data.errors?.length || 0,
-          warning_count: data.warnings?.length || 0,
-          valid_count: validCount,
-          auto_fix_count: 0,
-          data: data.data || [],
-          errors: data.errors || [],
-          warnings: data.warnings || [],
-          status: 'completed',
-        }).select('id').single();
-
-        if (!saveError && savedRecord) setValidationRecordId(savedRecord.id);
-
-        // Refresh history list
-        supabase.from('isp_validations')
-          .select('id, template_type, file_name, total_rows, error_count, warning_count, valid_count, auto_fix_count, created_at')
-          .order('created_at', { ascending: false })
-          .limit(20)
-          .then(({ data: hData }) => { if (hData) setHistory(hData); });
-      } else {
-        // Direct upload when Supabase is not configured
-        const formData = new FormData();
-        formData.append('file', file);
-        formData.append('templateType', templateType);
-        const { data } = await axios.post(`${API_BASE}/api/isp/validate`, formData);
-        validationResult = data;
-      }
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('templateType', templateType);
+      const { data: validationResult } = await axios.post(`${API_BASE}/api/isp/validate`, formData);
 
       setValidation(validationResult);
       setTimelineStep(2);
+
+      // Save to history
+      const validCount = validationResult.data ? validationResult.data.length - validationResult.errors.filter(e => e.row).length : 0;
+      try {
+        const sid = getSid();
+        const res = await fetch('/api/db/isp_validations', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: sid,
+            template_type: templateType,
+            file_name: file.name,
+            file_url: '',
+            total_rows: validationResult.data?.length || 0,
+            error_count: validationResult.errors?.length || 0,
+            warning_count: validationResult.warnings?.length || 0,
+            valid_count: validCount,
+            data: validationResult.data || [],
+            errors: validationResult.errors || [],
+            warnings: validationResult.warnings || [],
+          }),
+        });
+        const savedRecord = await res.json();
+        if (savedRecord?.id) setValidationRecordId(savedRecord.id);
+
+        // Refresh history
+        const histRes = await fetch(`/api/db/isp_validations?session_id=${encodeURIComponent(sid)}`);
+        const { rows } = await histRes.json();
+        if (rows) setHistory(rows.map(r => ({
+          id: r.id, template_type: r.template_type, file_name: r.file_name,
+          total_rows: r.total_rows, error_count: r.error_count, warning_count: r.warning_count,
+          valid_count: r.valid_count, auto_fix_count: r.auto_fix_count, created_at: r.created_at,
+        })));
+      } catch {}
     } catch (err) {
       setError(getErrMsg(err));
       setValidation(null);
@@ -270,24 +260,35 @@ export default function IspExcelValidator() {
       setSuccessMsg(`✨ Fixed ${fixed} issue${fixed !== 1 ? 's' : ''}`);
       setTimeout(() => setShowSuccess(false), 2000);
 
-      // Update Supabase record with auto-fix counts
-      if (supabaseConfigured && supabase && validationRecordId) {
-        const fixCounts = countFixes(data.fixedData, currentData);
-        const totalFixed = fixCounts.phone + fixCounts.date + fixCounts.billMonth + fixCounts.status + fixCounts.bill + fixCounts.other;
-        supabase.from('isp_validations').update({
-          auto_fix_count: totalFixed,
-          data: data.fixedData,
-          errors: data.remainingErrors,
-          warnings: data.remainingWarnings,
-          error_count: data.remainingErrors.length,
-          warning_count: data.remainingWarnings.length,
-          updated_at: new Date().toISOString(),
-        }).eq('id', validationRecordId).then(() => {
-          supabase.from('isp_validations')
-            .select('id, template_type, file_name, total_rows, error_count, warning_count, valid_count, auto_fix_count, created_at')
-            .order('created_at', { ascending: false }).limit(20)
-            .then(({ data: hData }) => { if (hData) setHistory(hData); });
-        });
+      // Update DB record with auto-fix counts
+      if (validationRecordId) {
+        try {
+          const fixCounts = countFixes(data.fixedData, currentData);
+          const totalFixed = fixCounts.phone + fixCounts.date + fixCounts.billMonth + fixCounts.status + fixCounts.bill + fixCounts.other;
+          await fetch(`/api/db/isp_validations/${validationRecordId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              data: {
+                auto_fix_count: totalFixed,
+                data: data.fixedData,
+                errors: data.remainingErrors,
+                warnings: data.remainingWarnings,
+                error_count: data.remainingErrors.length,
+                warning_count: data.remainingWarnings.length,
+              },
+            }),
+          });
+          // Refresh history
+          const sid = getSid();
+          const histRes = await fetch(`/api/db/isp_validations?session_id=${encodeURIComponent(sid)}`);
+          const { rows } = await histRes.json();
+          if (rows) setHistory(rows.map(r => ({
+            id: r.id, template_type: r.template_type, file_name: r.file_name,
+            total_rows: r.total_rows, error_count: r.error_count, warning_count: r.warning_count,
+            valid_count: r.valid_count, auto_fix_count: r.auto_fix_count, created_at: r.created_at,
+          })));
+        } catch {}
       }
     } catch (err) {
       setError(getErrMsg(err));
@@ -958,7 +959,7 @@ export default function IspExcelValidator() {
           </div>
 
           {/* History Panel */}
-          {supabaseConfigured && history.length > 0 && (
+          {historyEnabled && history.length > 0 && (
             <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
               <div style={{
                 padding: '12px 18px', borderBottom: '1px solid var(--border-color)',

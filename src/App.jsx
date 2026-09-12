@@ -1,6 +1,5 @@
 import { BrowserRouter, Routes, Route, Navigate, Link } from 'react-router-dom';
 import { ThemeProvider } from './context/ThemeContext';
-import { SupabaseProvider } from './context/SupabaseContext';
 import Layout from './components/Layout/Layout';
 import DataProcessor from './pages/DataProcessor/DataProcessor';
 import FillFromSample from './pages/DataProcessor/FillFromSample';
@@ -44,7 +43,6 @@ function Home() {
 
 export default function App() {
   return (
-    <SupabaseProvider>
     <ThemeProvider>
       <BrowserRouter>
         <Routes>
@@ -60,6 +58,5 @@ export default function App() {
         </Routes>
       </BrowserRouter>
     </ThemeProvider>
-    </SupabaseProvider>
   );
 }

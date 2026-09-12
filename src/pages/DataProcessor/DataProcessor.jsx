@@ -1,7 +1,6 @@
 import { useState, useMemo, useRef } from 'react';
-import { useSupabaseStorage } from '../../hooks/useSupabaseStorage';
+import { useDbStorage } from '../../hooks/useDbStorage';
 import CopyButton from '../../components/common/CopyButton';
-import { useSupabase } from '../../context/SupabaseContext';
 import FillFromSample from './FillFromSample';
 
 const ISP_COLS = [
@@ -89,7 +88,7 @@ const VALIDATORS = {
 };
 
 export default function DataProcessor() {
-  const { configured } = useSupabase();
+
   const [step, setStep] = useState('upload');
   const [uploadMode, setUploadMode] = useState('structured');
   const [apiKey, setApiKey] = useState('');
@@ -108,7 +107,7 @@ export default function DataProcessor() {
   const [bulkFind, setBulkFind] = useState('');
   const [bulkRep, setBulkRep] = useState('');
   const [bulkMsg, setBulkMsg] = useState('');
-  const [savedTemplates, setSavedTemplates] = useSupabaseStorage('saved_templates', 'superapp-saved-templates', []);
+  const [savedTemplates, setSavedTemplates] = useDbStorage('templates', 'superapp-saved-templates', []);
   const [templateName, setTemplateName] = useState('');
   const [showTemplateLib, setShowTemplateLib] = useState(false);
 
@@ -412,7 +411,7 @@ export default function DataProcessor() {
       <div className="card" style={{ marginBottom: 20, padding: '16px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
         <div>
           <h1 style={{ fontSize: 20, fontWeight: 700 }}>📄 ISP Data Processor</h1>
-          <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 2 }}>{fileName || 'No file loaded'} <span className={`badge ${configured ? 'badge-success' : 'badge-warning'}`}>{configured ? 'Supabase' : 'Local'}</span></p>
+          <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 2 }}>{fileName || 'No file loaded'} <span className="badge badge-success">PostgreSQL</span></p>
         </div>
         <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
           {steps.map((s, i) => (

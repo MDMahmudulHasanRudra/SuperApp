@@ -289,10 +289,16 @@ function autoFixRow(row, templateType) {
 
     switch (col.name) {
       case 'Mobile': {
-        let cleaned = String(newVal).replace(/[\s\-\(\)\.]/g, '');
-        cleaned = cleaned.replace(/\D/g, '');
+        let cleaned = String(newVal).replace(/\D/g, '');
+        // Drop an international prefix first: 00880…, +880… and 880… are all the
+        // same local 01… number. Trimming to 11 digits before this would keep the
+        // country code and cut real digits off the end.
+        if (cleaned.startsWith('00880')) cleaned = cleaned.slice(5);
+        else if (cleaned.startsWith('880')) cleaned = cleaned.slice(3);
+        // A local number typed without its leading zero (1812345679).
         if (cleaned.length === 10 && cleaned.startsWith('1')) cleaned = '0' + cleaned;
-        if (cleaned.length >= 11) cleaned = cleaned.slice(0, 11);
+        // Trailing junk on an otherwise valid local number.
+        if (cleaned.length > 11 && cleaned.startsWith('01')) cleaned = cleaned.slice(0, 11);
         if (/^01\d{9}$/.test(cleaned)) newVal = cleaned;
         break;
       }

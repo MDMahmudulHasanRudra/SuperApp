@@ -1,9 +1,8 @@
 import axios from 'axios';
 
-const isDev = import.meta.env.DEV;
-const BACKEND_URL = isDev
-  ? (import.meta.env.VITE_BACKEND_URL || 'http://localhost:3001')
-  : ''; // Production: same-domain (Vercel routes /api/* to serverless)
+// Always same-origin. In dev the vite server proxies /api to the backend
+// (see vite.config.js); in production Express serves the API and dist/ together.
+const BACKEND_URL = '';
 
 const api = axios.create({
   baseURL: BACKEND_URL,

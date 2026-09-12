@@ -1,6 +1,6 @@
 import { useState, useRef } from 'react';
 import { convertPDFToExcel } from '../../utils/pdfConverter';
-import { useSupabaseStorage } from '../../hooks/useSupabaseStorage';
+import { useDbStorage } from '../../hooks/useDbStorage';
 import LoadingSpinner from '../../components/common/LoadingSpinner';
 import ErrorMessage from '../../components/common/ErrorMessage';
 import CopyButton from '../../components/common/CopyButton';
@@ -28,7 +28,7 @@ export default function PDFToExcel() {
   const [result, setResult] = useState(null);
   const [progress, setProgress] = useState('');
   const [language, setLanguage] = useState('eng');
-  const [history, setHistory] = useSupabaseStorage('pdf_conversions', 'superapp-pdf-conversions', []);
+  const [history, setHistory] = useDbStorage('pdf_conversions', 'superapp-pdf-conversions', []);
   const inputRef = useRef(null);
 
   const handleFileChange = (e) => {

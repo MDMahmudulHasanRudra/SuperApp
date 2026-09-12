@@ -2,7 +2,6 @@ import { useEffect, useState, Component } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
 import Navbar from './Navbar';
 import Sidebar from './Sidebar';
-import { useSupabase } from '../../context/SupabaseContext';
 
 class ErrorBoundary extends Component {
   constructor(props) {
@@ -54,34 +53,6 @@ class ErrorBoundary extends Component {
     }
     return this.props.children;
   }
-}
-
-function SupabaseBanner() {
-  const { configured, loading, session } = useSupabase();
-  const [dismissed, setDismissed] = useState(() => sessionStorage.getItem('supabase-banner-dismissed') === 'true');
-
-  if (loading || dismissed || configured) return null;
-
-  return (
-    <div style={{
-      background: 'var(--warning)', color: '#212529', padding: '10px 24px',
-      fontSize: 13, fontWeight: 500, display: 'flex', alignItems: 'center',
-      justifyContent: 'space-between', gap: 16, flexWrap: 'wrap',
-      borderBottom: '1px solid rgba(0,0,0,0.1)',
-    }}>
-      <span>⚠️ Supabase is not connected. History and realtime features will fall back to localStorage. Add your Supabase URL and anon key in <code style={{ background: 'rgba(0,0,0,0.08)', padding: '2px 6px', borderRadius: 4 }}>.env</code> to enable cloud sync.</span>
-      <div style={{ display: 'flex', gap: 8 }}>
-        <button onClick={() => window.location.reload()} style={{
-          padding: '6px 14px', borderRadius: 'var(--radius)', border: '1px solid rgba(0,0,0,0.2)',
-          background: '#fff', cursor: 'pointer', fontSize: 12, fontWeight: 600,
-        }}>🔄 Retry</button>
-        <button onClick={() => { setDismissed(true); sessionStorage.setItem('supabase-banner-dismissed', 'true'); }} style={{
-          padding: '6px 14px', borderRadius: 'var(--radius)', border: 'none',
-          background: 'transparent', cursor: 'pointer', fontSize: 16, opacity: 0.7,
-        }}>✕</button>
-      </div>
-    </div>
-  );
 }
 
 export default function Layout() {
@@ -137,7 +108,6 @@ export default function Layout() {
         />
       )}
       <Navbar />
-      <SupabaseBanner />
       <Sidebar />
       <main className="main-content">
         <ErrorBoundary>

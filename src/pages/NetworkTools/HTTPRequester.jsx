@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { sendHTTPRequest } from '../../utils/api';
-import { useSupabaseStorage } from '../../hooks/useSupabaseStorage';
+import { useDbStorage } from '../../hooks/useDbStorage';
 import LoadingSpinner from '../../components/common/LoadingSpinner';
 import ErrorMessage from '../../components/common/ErrorMessage';
 import CopyButton from '../../components/common/CopyButton';
@@ -16,7 +16,7 @@ export default function HTTPRequester() {
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [collections, setCollections] = useSupabaseStorage('api_collections', 'superapp-api-collections', []);
+  const [collections, setCollections] = useDbStorage('api_collections', 'superapp-api-collections', []);
   const [selectedCollection, setSelectedCollection] = useState('');
   const [collectionName, setCollectionName] = useState('');
 

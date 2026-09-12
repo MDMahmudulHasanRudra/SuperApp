@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { discoverSubdomains, scanPorts } from '../../utils/api';
-import { useSupabaseStorage } from '../../hooks/useSupabaseStorage';
+import { useDbStorage } from '../../hooks/useDbStorage';
 import LoadingSpinner from '../../components/common/LoadingSpinner';
 import ErrorMessage from '../../components/common/ErrorMessage';
 import CopyButton from '../../components/common/CopyButton';
@@ -9,7 +9,7 @@ const COMMON_PORTS = [21, 22, 23, 25, 53, 80, 110, 143, 443, 465, 587, 993, 995,
 
 export default function ScanCampaigns() {
   const [form, setForm] = useState({ domain: '', ports: COMMON_PORTS.join(',') });
-  const [campaigns, setCampaigns] = useSupabaseStorage('scan_campaigns', 'superapp-scan-campaigns', []);
+  const [campaigns, setCampaigns] = useDbStorage('scan_campaigns', 'superapp-scan-campaigns', []);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [activeCampaign, setActiveCampaign] = useState(null);
@@ -142,7 +142,7 @@ export default function ScanCampaigns() {
     <div>
       <h2 style={{ fontSize: 20, fontWeight: 600, marginBottom: 16 }}>🎯 Subdomain & Port Scan Campaigns</h2>
       <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 16 }}>
-        Run multi-step recon: discover subdomains then scan for open ports on each. Results persist to Supabase.
+        Run multi-step recon: discover subdomains then scan for open ports on each. Results persist to PostgreSQL.
       </p>
 
       <div className="card" style={{ marginBottom: 24 }}>

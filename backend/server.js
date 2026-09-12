@@ -25,6 +25,28 @@ app.use(cors());
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ limit: '100mb', extended: true }));
 
+// Several handlers probe remote hosts, where the success, 'error' and 'timeout'
+// callbacks can all fire for the same request (a socket that times out after the
+// response was already sent, for example). A second res.json() throws
+// ERR_HTTP_HEADERS_SENT from a socket event, which is uncaught and kills the whole
+// process — so those handlers reply through this guard instead.
+function replyOnce(res) {
+  let done = false;
+  return {
+    json(body) { if (!done) { done = true; res.json(body); } },
+    fail(code, body) { if (!done) { done = true; res.status(code).json(body); } },
+    get sent() { return done; },
+  };
+}
+
+// Last-resort net: one flaky remote host should never take the tools offline.
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception (server kept alive):', err);
+});
+process.on('unhandledRejection', (err) => {
+  console.error('Unhandled rejection (server kept alive):', err);
+});
+
 app.post('/api/ping', (req, res) => {
   const { target, count = 4 } = req.body;
   if (!target) return res.status(400).json({ error: 'Target is required' });
@@ -75,29 +97,36 @@ app.post('/api/scan-port', async (req, res) => {
   const results = [];
   for (const port of ports) {
     try {
-      await new Promise((resolve, reject) => {
+      await new Promise((resolve) => {
         const socket = new net.Socket();
-        socket.setTimeout(2000);
-        socket.on('connect', () => {
-          results.push({ port, status: 'open' });
+        // A destroyed socket still emits 'error', so record the first outcome only.
+        let settled = false;
+        const finish = (status) => {
+          if (settled) return;
+          settled = true;
+          results.push({ port, status });
           socket.destroy();
           resolve();
-        });
-        socket.on('timeout', () => {
-          results.push({ port, status: 'filtered' });
-          socket.destroy();
-          reject();
-        });
-        socket.on('error', () => {
-          results.push({ port, status: 'closed' });
-          reject();
-        });
+        };
+        socket.setTimeout(2000);
+        socket.on('connect', () => finish('open'));
+        socket.on('timeout', () => finish('filtered'));
+        socket.on('error', () => finish('closed'));
         socket.connect(port, target);
       });
     } catch {}
   }
   res.json({ target, results });
 });
+
+// node's resolver returns objects for MX and TXT; render them the way dig does
+// rather than leaking JSON into the results table.
+function formatDnsRecord(type, addr) {
+  if (type === 'MX' && addr && typeof addr === 'object') return `${addr.priority} ${addr.exchange}`;
+  if (Array.isArray(addr)) return addr.join('');
+  if (addr && typeof addr === 'object') return JSON.stringify(addr);
+  return String(addr);
+}
 
 app.get('/api/dns', (req, res) => {
   const { domain } = req.query;
@@ -109,7 +138,7 @@ app.get('/api/dns', (req, res) => {
     dns.resolve(domain, type, (err, addresses) => {
       if (!err && addresses) {
         addresses.forEach(addr => {
-          results.push({ type, name: domain, value: typeof addr === 'object' ? JSON.stringify(addr) : String(addr), ttl: 300 });
+          results.push({ type, name: domain, value: formatDnsRecord(type, addr), ttl: 300 });
         });
       }
       pending--;
@@ -664,12 +693,13 @@ app.get('/api/http-headers', (req, res) => {
       headers: { 'User-Agent': 'SuperApp-NetworkTools/1.0' },
     };
 
+    const reply = replyOnce(res);
     const reqHttp = client.request(options, (response) => {
       const headers = {};
       Object.entries(response.headers).forEach(([key, val]) => {
         headers[key] = Array.isArray(val) ? val.join(', ') : String(val);
       });
-      res.json({
+      reply.json({
         url: targetUrl,
         statusCode: response.statusCode,
         statusMessage: response.statusMessage,
@@ -679,11 +709,13 @@ app.get('/api/http-headers', (req, res) => {
           total: Date.now() - start,
         },
       });
+      response.resume();
+      reqHttp.destroy();
     });
 
     const start = Date.now();
-    reqHttp.on('error', (err) => res.status(500).json({ error: err.message, url: targetUrl }));
-    reqHttp.on('timeout', () => { reqHttp.destroy(); res.status(504).json({ error: 'Request timed out', url: targetUrl }); });
+    reqHttp.on('error', (err) => reply.fail(500, { error: err.message, url: targetUrl }));
+    reqHttp.on('timeout', () => { reqHttp.destroy(); reply.fail(504, { error: 'Request timed out', url: targetUrl }); });
     reqHttp.end();
   } catch (err) {
     res.status(400).json({ error: 'Invalid URL', url: targetUrl });
@@ -695,6 +727,7 @@ app.get('/api/ssl-cert', (req, res) => {
   const { host, port = 443 } = req.query;
   if (!host) return res.status(400).json({ error: 'Host is required' });
 
+  const reply = replyOnce(res);
   const socket = tls.connect({ host, port, servername: host, rejectUnauthorized: false }, () => {
     const cert = socket.getPeerCertificate(true);
     const validFrom = new Date(cert.valid_from).toISOString();
@@ -703,7 +736,7 @@ app.get('/api/ssl-cert', (req, res) => {
 
     socket.end();
 
-    res.json({
+    reply.json({
       host,
       port,
       subject: {
@@ -730,8 +763,8 @@ app.get('/api/ssl-cert', (req, res) => {
   });
 
   socket.setTimeout(10000);
-  socket.on('error', (err) => res.status(500).json({ error: `Could not connect: ${err.message}`, host, port }));
-  socket.on('timeout', () => { socket.destroy(); res.status(504).json({ error: 'Connection timed out', host, port }); });
+  socket.on('error', (err) => reply.fail(500, { error: `Could not connect: ${err.message}`, host, port }));
+  socket.on('timeout', () => { socket.destroy(); reply.fail(504, { error: 'Connection timed out', host, port }); });
 });
 
 // === SCAN CAMPAIGN (subdomain discovery + port scan) ===
@@ -826,6 +859,7 @@ app.post('/api/http-test', async (req, res) => {
     };
 
     const dnsTime = Date.now() - dnsStart;
+    const reply = replyOnce(res);
 
     const reqHttp = client.request(options, (response) => {
       const responseHeaders = {};
@@ -841,7 +875,7 @@ app.post('/api/http-test', async (req, res) => {
         const totalTime = Date.now() - startTotal;
         const ttfb = connectTime;
 
-        res.json({
+        reply.json({
           url: targetUrl,
           method: method.toUpperCase(),
           statusCode: response.statusCode,
@@ -866,8 +900,8 @@ app.post('/api/http-test', async (req, res) => {
       });
     });
 
-    reqHttp.on('error', (err) => res.status(500).json({ error: err.message, url: targetUrl }));
-    reqHttp.on('timeout', () => { reqHttp.destroy(); res.status(504).json({ error: 'Request timed out', url: targetUrl }); });
+    reqHttp.on('error', (err) => reply.fail(500, { error: err.message, url: targetUrl }));
+    reqHttp.on('timeout', () => { reqHttp.destroy(); reply.fail(504, { error: 'Request timed out', url: targetUrl }); });
 
     if (body && method.toUpperCase() !== 'GET' && method.toUpperCase() !== 'HEAD') {
       reqHttp.write(body);
@@ -1071,12 +1105,45 @@ app.post('/api/run-scenario', async (req, res) => {
 
 // === CMD CONSOLE (safe command execution) ===
 const SAFE_CMDS = ['ping', 'tracert', 'traceroute', 'pathping', 'nslookup', 'netstat', 'ipconfig', 'arp', 'systeminfo', 'hostname', 'route', 'date', 'time', 'ver', 'whoami', 'net', 'echo'];
+
+// The console speaks Windows command names; in the Linux container they need
+// their POSIX equivalents, otherwise the tool just reports "not found".
+const LINUX_EQUIVALENTS = {
+  tracert: 'traceroute',
+  pathping: 'traceroute',
+  ipconfig: 'ip addr',
+  systeminfo: 'uname -a',
+  ver: 'uname -r',
+  time: 'date',
+};
+
+// args is interpolated into a shell, so anything that could chain or redirect a
+// second command is refused — the allowlist above would be meaningless otherwise.
+const SHELL_METACHARS = /[;&|`$(){}<>\\\n\r]/;
+
 app.post('/api/cmd', (req, res) => {
   const { command, args } = req.body;
   if (!command) return res.status(400).json({ error: 'Command required' });
   if (!SAFE_CMDS.includes(command)) return res.status(403).json({ error: `Command '${command}' not allowed` });
-  const fullCmd = process.platform === 'win32' ? `${command} ${args || ''}` : command === 'tracert' ? `traceroute ${args || ''}` : `${command} ${args || ''}`;
-  exec(fullCmd, { timeout: 30000, shell: true }, (err, stdout, stderr) => {
+
+  const cmdArgs = (args || '').trim();
+  if (SHELL_METACHARS.test(cmdArgs)) {
+    return res.status(400).json({ error: 'Arguments contain characters that are not allowed' });
+  }
+
+  const onWindows = process.platform === 'win32';
+  const binary = onWindows ? command : (LINUX_EQUIVALENTS[command] || command);
+
+  // Linux ping runs until interrupted; Windows sends 4 by default. Match that so
+  // an unqualified "ping host" returns instead of sitting until the timeout.
+  let finalArgs = cmdArgs;
+  if (!onWindows && command === 'ping' && !/(^|\s)-[cw]\b/.test(cmdArgs)) {
+    finalArgs = `-c 4 ${cmdArgs}`.trim();
+  }
+
+  const fullCmd = `${binary} ${finalArgs}`.trim();
+
+  exec(fullCmd, { timeout: 30000, shell: true, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
     const output = (stdout || '') + (stderr || '');
     res.json({ output: output || (err ? err.message : '(no output)'), command, args, error: !!err });
   });
@@ -1185,6 +1252,238 @@ app.post('/api/isp/download', async (req, res) => {
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', 'attachment; filename="fixed-clients.xlsx"');
     res.send(buf);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// === POSTGRESQL CRUD API ===
+let db = null;
+try { db = require('./db'); } catch { db = null; }
+
+app.get('/api/db/health', async (req, res) => {
+  if (!db) return res.json({ ok: false, error: 'Database module not loaded' });
+  const health = await db.healthCheck();
+  res.json(health);
+});
+
+// Tables shaped as (session_id UNIQUE, data JSONB) — handled generically.
+const BLOB_TABLES = [
+  'templates', 'extracted_data', 'ping_history', 'user_preferences',
+  'http_profiles', 'subdomain_history', 'scenarios', 'port_scans',
+  'pdf_conversions', 'api_collections', 'scan_campaigns', 'ssl_certificates',
+  'dashboard_targets', 'profiles',
+];
+
+// Tables with their own column layout and dedicated handlers below.
+const STRUCTURED_TABLES = ['data_sessions', 'network_checks', 'isp_validations'];
+
+const TABLES = [...BLOB_TABLES, ...STRUCTURED_TABLES];
+
+// Rejects anything not on the whitelist, so table names are safe to interpolate.
+function checkTable(req, res) {
+  const { table } = req.params;
+  if (!TABLES.includes(table)) {
+    res.status(400).json({ error: `Invalid table: ${table}` });
+    return null;
+  }
+  if (!db) {
+    res.status(503).json({ error: 'Database not available' });
+    return null;
+  }
+  return table;
+}
+
+const sessionOf = (v) => (typeof v === 'string' && v.trim()) || 'default';
+
+app.get('/api/db/:table', async (req, res) => {
+  const table = checkTable(req, res);
+  if (!table) return;
+  const sessionId = sessionOf(req.query.session_id);
+  const limit = Math.min(parseInt(req.query.limit, 10) || 500, 2000);
+  try {
+    const result = await db.query(
+      `SELECT * FROM ${table} WHERE session_id = $1 ORDER BY created_at DESC LIMIT $2`,
+      [sessionId, limit]
+    );
+    res.json({ rows: result.rows, count: result.rowCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/db/:table', async (req, res) => {
+  const table = checkTable(req, res);
+  if (!table) return;
+  const body = req.body;
+  const sessionId = sessionOf(Array.isArray(body) ? body[0]?.session_id : body.session_id);
+  try {
+    if (table === 'data_sessions') {
+      return res.json(await upsertDataSession(sessionId, body));
+    }
+
+    if (table === 'network_checks') {
+      const rows = Array.isArray(body) ? body : [body];
+      const saved = [];
+      for (const row of rows) {
+        const r = await db.query(
+          `INSERT INTO network_checks (session_id, target, type, status, latency_ms, checked_at)
+           VALUES ($1, $2, $3, $4, $5, COALESCE($6::timestamptz, NOW())) RETURNING *`,
+          [sessionOf(row.session_id) === 'default' ? sessionId : sessionOf(row.session_id),
+            row.target, row.type, row.status, row.latency_ms ?? null, row.checked_at ?? null]
+        );
+        saved.push(r.rows[0]);
+      }
+      return res.json(Array.isArray(body) ? saved : saved[0]);
+    }
+
+    if (table === 'isp_validations') {
+      const r = await db.query(
+        `INSERT INTO isp_validations
+           (session_id, template_type, file_name, file_url, total_rows,
+            error_count, warning_count, valid_count, auto_fix_count, data, errors, warnings)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+        [sessionId, body.template_type, body.file_name || '', body.file_url || '',
+          body.total_rows || 0, body.error_count || 0, body.warning_count || 0,
+          body.valid_count || 0, body.auto_fix_count || 0,
+          JSON.stringify(body.data || []), JSON.stringify(body.errors || []),
+          JSON.stringify(body.warnings || [])]
+      );
+      return res.json(r.rows[0]);
+    }
+
+    // Blob table: one row per session, replaced on write.
+    const data = body.data !== undefined ? body.data : body;
+    const r = await db.query(
+      `INSERT INTO ${table} (session_id, data) VALUES ($1, $2)
+       ON CONFLICT (session_id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+       RETURNING *`,
+      [sessionId, JSON.stringify(data)]
+    );
+    res.json(r.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch('/api/db/:table/upsert', async (req, res) => {
+  const table = checkTable(req, res);
+  if (!table) return;
+  const body = req.body;
+  const sessionId = sessionOf(body.session_id);
+  try {
+    if (table === 'data_sessions') {
+      return res.json(await upsertDataSession(sessionId, body));
+    }
+    if (STRUCTURED_TABLES.includes(table)) {
+      return res.status(400).json({ error: `${table} does not support upsert; use POST` });
+    }
+    const data = body.data !== undefined ? body.data : body;
+    const r = await db.query(
+      `INSERT INTO ${table} (session_id, data) VALUES ($1, $2)
+       ON CONFLICT (session_id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+       RETURNING *`,
+      [sessionId, JSON.stringify(data)]
+    );
+    res.json(r.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// data_sessions carries one row per browser session, keyed by session_id.
+async function upsertDataSession(sessionId, body) {
+  const r = await db.query(
+    `INSERT INTO data_sessions
+       (session_id, step, demo_file_name, demo_headers, demo_rows,
+        source_file_name, source_headers, source_rows, col_map, filled_data, unique_rules)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+     ON CONFLICT (session_id) DO UPDATE SET
+       step = EXCLUDED.step,
+       demo_file_name = EXCLUDED.demo_file_name,
+       demo_headers = EXCLUDED.demo_headers,
+       demo_rows = EXCLUDED.demo_rows,
+       source_file_name = EXCLUDED.source_file_name,
+       source_headers = EXCLUDED.source_headers,
+       source_rows = EXCLUDED.source_rows,
+       col_map = EXCLUDED.col_map,
+       filled_data = EXCLUDED.filled_data,
+       unique_rules = EXCLUDED.unique_rules,
+       updated_at = NOW()
+     RETURNING *`,
+    [sessionId, body.step || 'upload-demo', body.demo_file_name || '',
+      JSON.stringify(body.demo_headers || []), JSON.stringify(body.demo_rows || []),
+      body.source_file_name || '', JSON.stringify(body.source_headers || []),
+      JSON.stringify(body.source_rows || []), JSON.stringify(body.col_map || {}),
+      JSON.stringify(body.filled_data || []),
+      JSON.stringify(body.unique_rules || { clientCode: true, mobile: true })]
+  );
+  return r.rows[0];
+}
+
+app.put('/api/db/:table/:id', async (req, res) => {
+  const table = checkTable(req, res);
+  if (!table) return;
+  const { id } = req.params;
+  const body = req.body;
+  try {
+    // isp_validations updates real columns, not a JSON blob (auto-fix counts, etc.)
+    if (table === 'isp_validations') {
+      const patch = body.data && !Array.isArray(body.data) ? body.data : body;
+      const r = await db.query(
+        `UPDATE isp_validations SET
+           auto_fix_count = COALESCE($1, auto_fix_count),
+           error_count    = COALESCE($2, error_count),
+           warning_count  = COALESCE($3, warning_count),
+           data           = COALESCE($4::jsonb, data),
+           errors         = COALESCE($5::jsonb, errors),
+           warnings       = COALESCE($6::jsonb, warnings),
+           updated_at     = NOW()
+         WHERE id = $7 RETURNING *`,
+        [patch.auto_fix_count ?? null, patch.error_count ?? null, patch.warning_count ?? null,
+          patch.data ? JSON.stringify(patch.data) : null,
+          patch.errors ? JSON.stringify(patch.errors) : null,
+          patch.warnings ? JSON.stringify(patch.warnings) : null,
+          id]
+      );
+      if (r.rowCount === 0) return res.status(404).json({ error: 'Not found' });
+      return res.json(r.rows[0]);
+    }
+
+    if (STRUCTURED_TABLES.includes(table)) {
+      return res.status(400).json({ error: `${table} does not support generic update` });
+    }
+
+    const data = body.data !== undefined ? body.data : body;
+    const r = await db.query(
+      `UPDATE ${table} SET data = $1, updated_at = NOW() WHERE id = $2 RETURNING *`,
+      [JSON.stringify(data), id]
+    );
+    if (r.rowCount === 0) return res.status(404).json({ error: 'Not found' });
+    res.json(r.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/db/:table/:id', async (req, res) => {
+  const table = checkTable(req, res);
+  if (!table) return;
+  try {
+    const r = await db.query(`DELETE FROM ${table} WHERE id = $1`, [req.params.id]);
+    res.json({ ok: true, deleted: r.rowCount });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/db/:table', async (req, res) => {
+  const table = checkTable(req, res);
+  if (!table) return;
+  const sessionId = sessionOf(req.query.session_id);
+  try {
+    const r = await db.query(`DELETE FROM ${table} WHERE session_id = $1`, [sessionId]);
+    res.json({ ok: true, deleted: r.rowCount });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

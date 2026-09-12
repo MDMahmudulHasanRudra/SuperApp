@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react';
-import { useSupabaseStorage } from '../../hooks/useSupabaseStorage';
+import { useDbStorage } from '../../hooks/useDbStorage';
 import LoadingSpinner from '../../components/common/LoadingSpinner';
 import ErrorMessage from '../../components/common/ErrorMessage';
 import CopyButton from '../../components/common/CopyButton';
@@ -16,7 +16,7 @@ export default function Ping() {
   const [continuous, setContinuous] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [showRaw, setShowRaw] = useState(false);
-  const [history, setHistory] = useSupabaseStorage('ping_history', 'superapp-ping-history', []);
+  const [history, setHistory] = useDbStorage('ping_history', 'superapp-ping-history', []);
   const continuousRef = useRef(null);
 
   const addPingResult = (target, res, sum) => {

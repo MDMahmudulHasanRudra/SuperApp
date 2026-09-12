@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useSupabaseStorage } from '../../hooks/useSupabaseStorage';
+import { useDbStorage } from '../../hooks/useDbStorage';
 import LoadingSpinner from '../../components/common/LoadingSpinner';
 import ErrorMessage from '../../components/common/ErrorMessage';
 import CopyButton from '../../components/common/CopyButton';
@@ -30,7 +30,7 @@ export default function PortScanner() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [progress, setProgress] = useState(0);
-  const [savedScans, setSavedScans] = useSupabaseStorage('port_scans', 'superapp-port-scans', []);
+  const [savedScans, setSavedScans] = useDbStorage('port_scans', 'superapp-port-scans', []);
   const [showSaved, setShowSaved] = useState(false);
 
   const getPortsToScan = () => {
