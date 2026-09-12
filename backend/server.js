@@ -728,7 +728,12 @@ app.get('/api/ssl-cert', (req, res) => {
   if (!host) return res.status(400).json({ error: 'Host is required' });
 
   const reply = replyOnce(res);
-  const socket = tls.connect({ host, port, servername: host, rejectUnauthorized: false }, () => {
+  // SNI must be a hostname; sending an IP is invalid per RFC 6066 and Node warns.
+  const isIp = net.isIP(String(host)) !== 0;
+  const tlsOpts = { host, port, rejectUnauthorized: false };
+  if (!isIp) tlsOpts.servername = host;
+
+  const socket = tls.connect(tlsOpts, () => {
     const cert = socket.getPeerCertificate(true);
     const validFrom = new Date(cert.valid_from).toISOString();
     const validTo = new Date(cert.valid_to).toISOString();
