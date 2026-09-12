@@ -3,6 +3,7 @@ const cors = require('cors');
 const { exec } = require('child_process');
 const dns = require('dns');
 const net = require('net');
+const crypto = require('crypto');
 let whois;
 try { whois = require('whois'); } catch { whois = null; }
 const { RouterOSClient } = require('mikro-routeros');
@@ -39,6 +40,15 @@ function replyOnce(res) {
   };
 }
 
+// Targets reach `exec` as part of a shell command string, so only real hostnames
+// and IP addresses may pass — otherwise "8.8.8.8; cat /etc/passwd" runs too.
+const HOSTNAME_RE = /^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$/;
+function isValidHost(value) {
+  const v = String(value ?? '').trim();
+  if (!v || v.length > 253) return false;
+  return net.isIP(v) !== 0 || HOSTNAME_RE.test(v);
+}
+
 // Last-resort net: one flaky remote host should never take the tools offline.
 process.on('uncaughtException', (err) => {
   console.error('Uncaught exception (server kept alive):', err);
@@ -50,7 +60,9 @@ process.on('unhandledRejection', (err) => {
 app.post('/api/ping', (req, res) => {
   const { target, count = 4 } = req.body;
   if (!target) return res.status(400).json({ error: 'Target is required' });
-  const cmd = process.platform === 'win32' ? `ping -n ${count} ${target}` : `ping -c ${count} ${target}`;
+  if (!isValidHost(target)) return res.status(400).json({ error: 'Target must be a hostname or IP address' });
+  const n = Math.min(Math.max(parseInt(count, 10) || 4, 1), 20);
+  const cmd = process.platform === 'win32' ? `ping -n ${n} ${target}` : `ping -c ${n} ${target}`;
   exec(cmd, { timeout: 30000 }, (err, stdout, stderr) => {
     if (err) return res.json({ status: 'unreachable', error: stderr || err.message, output: stdout, raw: stdout });
     const lines = stdout.split('\n');
@@ -170,6 +182,7 @@ app.get('/api/whois', (req, res) => {
 app.get('/api/traceroute', (req, res) => {
   const { target } = req.query;
   if (!target) return res.status(400).json({ error: 'Target required' });
+  if (!isValidHost(target)) return res.status(400).json({ error: 'Target must be a hostname or IP address' });
   const cmd = process.platform === 'win32' ? `tracert -d ${target}` : `traceroute -n ${target}`;
   exec(cmd, { timeout: 30000 }, (err, stdout) => {
     if (err) return res.json({ target, hops: [], error: err.message, raw: stdout });
@@ -220,83 +233,140 @@ app.get('/api/ip-info', async (req, res) => {
 });
 
 // === MIKROTIK API CHECKER ===
+// RouterOS before 6.43 answers the first /login with a challenge (!done =ret=…)
+// instead of logging you in. The client library reads that as a successful modern
+// login, so every later query comes back "not logged in" and the check looks like
+// it half-worked. Verify the session with a real query and, if the router wants
+// the old flow, complete the challenge-response handshake here.
+async function ensureMikrotikSession(client, username, password) {
+  try {
+    await client.runQuery('/system/identity/print');
+    return 'modern';
+  } catch (err) {
+    if (!/not logged in/i.test(err.message || '')) throw err;
+  }
+
+  // _sendRaw is internal to mikro-routeros, which is why that dependency is
+  // pinned rather than floating. If a future version drops it, say so plainly
+  // instead of reporting a confusing half-success.
+  if (typeof client._sendRaw !== 'function') {
+    throw new Error('Router requires the legacy (pre-6.43) login flow, which this client cannot perform');
+  }
+
+  const probe = await client._sendRaw('/login', {}, { collectAll: true, retryOnNotLoggedIn: false });
+  let challengeHex = null;
+  for (const sentence of probe) {
+    for (const word of sentence.slice(1)) {
+      if (word.startsWith('=ret=')) { challengeHex = word.slice(5); break; }
+    }
+    if (challengeHex) break;
+  }
+  if (!challengeHex) throw new Error('Legacy login failed: the router did not return a challenge');
+
+  const md5 = crypto.createHash('md5');
+  md5.update(Buffer.from([0]));
+  md5.update(Buffer.from(password, 'utf8'));
+  md5.update(Buffer.from(challengeHex, 'hex'));
+
+  await client._sendRaw(
+    '/login',
+    { name: username, response: '00' + md5.digest('hex') },
+    { collectAll: false, retryOnNotLoggedIn: false }
+  );
+
+  // Prove the legacy handshake actually took.
+  await client._sendRaw('/system/identity/print', {}, { collectAll: false, retryOnNotLoggedIn: false });
+  return 'legacy';
+}
+
 app.post('/api/mikrotik/test', async (req, res) => {
   const { host, port = 8728, username, password } = req.body;
   if (!host || !username || !password) return res.status(400).json({ error: 'Host, username, and password are required' });
+  if (!isValidHost(host)) return res.status(400).json({ error: 'Host must be a hostname or IP address' });
+
+  const apiPort = Math.min(Math.max(parseInt(port, 10) || 8728, 1), 65535);
 
   const diagnostics = [];
   const addDiag = (phase, status, message, detail = null) => {
     diagnostics.push({ phase, status, message, detail });
   };
 
-  // Phase 1: Ping reachability
-  try {
+  // Phase 1: Ping reachability — informational only.
+  // Plenty of RouterOS boxes drop ICMP (a firewall rule, or the device sitting
+  // behind one) while the API port answers perfectly well, so a silent ping must
+  // not abort the check. Phase 2 is what decides whether the device is usable.
+  await new Promise((resolve) => {
     const pingCmd = process.platform === 'win32' ? `ping -n 2 ${host}` : `ping -c 2 ${host}`;
-    await new Promise((resolve, reject) => {
-      exec(pingCmd, { timeout: 10000 }, (err, stdout) => {
-        if (err || !stdout.includes('TTL') && !stdout.includes('ttl') && !stdout.includes('time=') && !stdout.includes('time<')) {
-          addDiag('ping', 'fail', `Host ${host} is not reachable`, stdout?.substring(0, 400) || '');
-          reject(new Error('Unreachable'));
-        } else {
-          addDiag('ping', 'pass', `Host ${host} is reachable`);
-          resolve();
-        }
-      });
+    exec(pingCmd, { timeout: 10000 }, (err, stdout = '') => {
+      const replied = /ttl[=:]|time[=<]/i.test(stdout);
+      if (err || !replied) {
+        addDiag('ping', 'warn', `${host} did not answer ICMP — continuing, the API may still be reachable`,
+          (stdout || '').substring(0, 400));
+      } else {
+        addDiag('ping', 'pass', `Host ${host} is reachable`);
+      }
+      resolve();
     });
-  } catch {
-    return res.json({
-      success: false,
-      diagnostics,
-      message: 'NETWORK FAIL - Host unreachable',
-      details: `The IP address ${host} did not respond to ping. Check: (1) Is the device powered on? (2) Is the IP correct? (3) Are you on the same network? (4) Does the firewall allow ICMP?`,
-    });
-  }
+  });
 
-  // Phase 2: Port open check
+  // Phase 2: Port open check — this is the real gate.
   try {
     await new Promise((resolve, reject) => {
       const socket = new net.Socket();
+      let settled = false;
+      const finish = (ok, message, detail) => {
+        if (settled) return;
+        settled = true;
+        addDiag('port', ok ? 'pass' : 'fail', message, detail);
+        socket.destroy();
+        ok ? resolve() : reject(new Error(message));
+      };
       socket.setTimeout(5000);
-      socket.on('connect', () => {
-        addDiag('port', 'pass', `Port ${port} is open`);
-        socket.destroy();
-        resolve();
-      });
-      socket.on('timeout', () => {
-        addDiag('port', 'fail', `Port ${port} is filtered (no response)`);
-        socket.destroy();
-        reject(new Error('Filtered'));
-      });
-      socket.on('error', (err) => {
-        addDiag('port', 'fail', `Port ${port} is closed`, err.message);
-        reject(new Error('Closed'));
-      });
-      socket.connect(port, host);
+      socket.on('connect', () => finish(true, `Port ${apiPort} is open`));
+      socket.on('timeout', () => finish(false, `Port ${apiPort} is filtered (no response)`));
+      socket.on('error', (err) => finish(false, `Port ${apiPort} is closed`, err.message));
+      socket.connect(apiPort, host);
     });
   } catch {
     return res.json({
       success: false,
       diagnostics,
       message: 'API PORT NOT ACCESSIBLE',
-      details: `Port ${port} on ${host} is closed or filtered. Check: (1) Is the API service enabled in RouterOS? (/ip service enable api) (2) Is the port correct? Default is 8728. (3) Is there a firewall blocking the port?`,
+      details: `Port ${apiPort} on ${host} is closed or filtered. Check: (1) Is the API service enabled in RouterOS? (/ip service enable api) (2) Is the port correct? Default is 8728. (3) Is there a firewall blocking the port? (4) Does /ip service allow your address? (/ip service set api address=...)`,
     });
   }
 
-  // Phase 3: RouterOS API login
+  // Phase 3: RouterOS API connect + login
   let client = null;
   try {
-    client = new RouterOSClient(host, port, 15000);
+    client = new RouterOSClient(host, apiPort, 15000);
     await client.connect();
-    await client.login(username, password);
-    addDiag('auth', 'pass', 'Authentication successful');
   } catch (err) {
-    addDiag('auth', 'fail', 'Authentication failed', err.message || 'Invalid credentials');
-    if (client) { try { await client.close(); } catch {} }
+    addDiag('auth', 'fail', 'Could not open an API session', err.message);
+    if (client) { try { client.close(); } catch {} }
+    return res.json({
+      success: false,
+      diagnostics,
+      message: 'API CONNECTION FAILED',
+      details: `The TCP port accepted a connection but the RouterOS API did not respond. Check: (1) Is port ${apiPort} really the API service and not api-ssl (8729) or Winbox (8291)? (2) Is another service using this port?`,
+    });
+  }
+
+  try {
+    await client.login(username, password);
+    const flow = await ensureMikrotikSession(client, username, password);
+    addDiag('auth', 'pass', flow === 'legacy'
+      ? 'Authentication successful (legacy pre-6.43 login)'
+      : 'Authentication successful');
+  } catch (err) {
+    const detail = err.message || 'Invalid credentials';
+    addDiag('auth', 'fail', 'Authentication failed', detail);
+    try { client.close(); } catch {}
     return res.json({
       success: false,
       diagnostics,
       message: 'AUTHENTICATION FAILED',
-      details: 'The IP is reachable and port is open, but the username or password is incorrect. Check: (1) Username (case-sensitive) (2) Password (3) Is the user allowed to login via API? (/user set [username] address=0.0.0.0/0)',
+      details: 'The port is open, but the username or password was rejected. Check: (1) Username (case-sensitive) (2) Password (3) Is the user allowed to log in via API? (/user set [username] address=0.0.0.0/0) (4) Does the user group have the "api" policy?',
     });
   }
 
@@ -336,7 +406,7 @@ app.post('/api/mikrotik/test', async (req, res) => {
         comment: iface.comment || '',
         // Ethernet-specific port details
         speed: eth['advertised-link-modes']
-          ? (eth['advertised-link-modes'].match(/(\d+[MG])bps/) || [])[1] || eth.speed || '—'
+          ? (eth['advertised-link-modes'].match(/(\d+[MG]bps)/) || [])[1] || eth.speed || '—'
           : eth.speed || '—',
         duplex: eth['auto-negotiation'] === 'true' ? 'auto' : (eth.duplex || '—'),
         poeOut: eth['poe-out'] || (eth['poe'] || '—'),
@@ -396,9 +466,17 @@ app.post('/api/mikrotik/test', async (req, res) => {
       },
     });
   } catch (err) {
-    if (client) { try { await client.close(); } catch {} }
+    if (client) { try { client.close(); } catch {} }
     addDiag('info', 'fail', 'Failed to fetch system info', err.message);
-    return res.json({ success: true, diagnostics, message: 'Logged in but info retrieval partially failed', info: null });
+    // Not a success: without info there is nothing to show, and a green result
+    // here would hide the real problem.
+    return res.json({
+      success: false,
+      diagnostics,
+      message: 'LOGGED IN BUT COULD NOT READ SYSTEM INFO',
+      details: `The session opened but ${err.message}. Check that the user's group has the "read" and "api" policies (/user group print), and that the RouterOS version supports these commands.`,
+      info: null,
+    });
   }
 });
 
@@ -446,29 +524,27 @@ function bufferToStr(buf) {
 app.post('/api/snmp/check', async (req, res) => {
   const { host, community = 'public', port = 161, version = '2c' } = req.body;
   if (!host) return res.status(400).json({ error: 'Host is required' });
+  if (!isValidHost(host)) return res.status(400).json({ error: 'Host must be a hostname or IP address' });
 
   const diagnostics = [];
   const addDiag = (phase, status, message, detail = null) => {
     diagnostics.push({ phase, status, message, detail });
   };
 
-  // Phase 1: Ping
-  try {
+  // Phase 1: Ping — informational, same reasoning as the MikroTik checker:
+  // a device that drops ICMP can still answer SNMP.
+  await new Promise((resolve) => {
     const pingCmd = process.platform === 'win32' ? `ping -n 2 ${host}` : `ping -c 2 ${host}`;
-    await new Promise((resolve, reject) => {
-      exec(pingCmd, { timeout: 10000 }, (err, stdout) => {
-        if (err || (!stdout.includes('TTL') && !stdout.includes('ttl') && !stdout.includes('time=') && !stdout.includes('time<'))) {
-          addDiag('ping', 'fail', `Host ${host} is not reachable`);
-          reject(new Error('Unreachable'));
-        } else {
-          addDiag('ping', 'pass', `Host ${host} is reachable`);
-          resolve();
-        }
-      });
+    exec(pingCmd, { timeout: 10000 }, (err, stdout = '') => {
+      const replied = /ttl[=:]|time[=<]/i.test(stdout);
+      if (err || !replied) {
+        addDiag('ping', 'warn', `${host} did not answer ICMP — continuing, SNMP may still respond`);
+      } else {
+        addDiag('ping', 'pass', `Host ${host} is reachable`);
+      }
+      resolve();
     });
-  } catch {
-    return res.json({ success: false, diagnostics, message: 'Host unreachable' });
-  }
+  });
 
   // Phase 2: SNMP connection
   let session = null;
@@ -1506,4 +1582,15 @@ if (fs.existsSync(distPath)) {
 }
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`SuperApp backend running on port ${PORT}`));
+const server = app.listen(PORT, () => console.log(`SuperApp backend running on port ${PORT}`));
+
+// Failing to bind is fatal — without this the uncaughtException guard above would
+// keep a server alive that never accepted a single connection.
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} is already in use. Stop the other process or set PORT.`);
+  } else {
+    console.error('Server failed to start:', err);
+  }
+  process.exit(1);
+});

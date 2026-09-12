@@ -6,7 +6,7 @@
     "axios": "^1.18.1",
     "cors": "^2.8.5",
     "express": "^4.18.2",
-    "mikro-routeros": "^1.0.6",
+    "mikro-routeros": "1.0.6",
     "multer": "^2.2.0",
     "net-snmp": "^3.26.1",
     "validator": "^13.15.35",

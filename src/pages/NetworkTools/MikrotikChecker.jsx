@@ -116,18 +116,20 @@ export default function MikrotikChecker() {
             {PHASES.map(phase => {
               const diag = result.diagnostics?.find(d => d.phase === phase.key);
               const isPass = diag?.status === 'pass';
+              // A warning (an unanswered ping, say) is not a failure — the check carries on.
+              const isWarn = diag?.status === 'warn';
               const isPending = !diag;
               return (
                 <div key={phase.key} style={{
                   display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 0',
                   borderBottom: '1px solid var(--border-color)', opacity: isPending ? 0.4 : 1,
                 }}>
-                  <span style={{ fontSize: 18, marginTop: 1 }}>{isPending ? '⏳' : isPass ? '✅' : '❌'}</span>
+                  <span style={{ fontSize: 18, marginTop: 1 }}>{isPending ? '⏳' : isPass ? '✅' : isWarn ? '⚠️' : '❌'}</span>
                   <div style={{ flex: 1 }}>
                     <div style={{ fontWeight: 600, fontSize: 13 }}>{phase.icon} {phase.label}</div>
                     {diag && (
                       <>
-                        <div style={{ fontSize: 12, color: isPass ? 'var(--success)' : 'var(--danger)', marginTop: 2 }}>
+                        <div style={{ fontSize: 12, color: isPass ? 'var(--success)' : isWarn ? 'var(--warning)' : 'var(--danger)', marginTop: 2 }}>
                           {diag.message}
                         </div>
                         {diag.detail && (

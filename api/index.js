@@ -12,6 +12,15 @@ const tls = require('tls');
 const multer = require('multer');
 const { validateAll, autoFixAll, dataToSheet, parseFile, validateHeaders } = require('./_isp-validator');
 
+// Targets reach `exec` as part of a shell command string, so only real hostnames
+// and IP addresses may pass — otherwise "8.8.8.8; cat /etc/passwd" runs too.
+const HOSTNAME_RE = /^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$/;
+function isValidHost(value) {
+  const v = String(value ?? '').trim();
+  if (!v || v.length > 253) return false;
+  return net.isIP(v) !== 0 || HOSTNAME_RE.test(v);
+}
+
 const isServerless = !process.env.PORT || !!process.env.VERCEL;
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -37,13 +46,15 @@ app.use(express.urlencoded({ limit: '100mb', extended: true }));
 app.post('/api/ping', async (req, res) => {
   const { target, count = 4 } = req.body;
   if (!target) return res.status(400).json({ error: 'Target is required' });
+  if (!isValidHost(target)) return res.status(400).json({ error: 'Target must be a hostname or IP address' });
   if (isServerless) {
     const simTimes = Array.from({ length: count }, () => 10 + Math.random() * 190);
     const simPkts = simTimes.map((t, i) => ({ seq: i + 1, time: t, status: 'Success' }));
     return res.json({ status: 'reachable', target, sent: count, received: count, loss: '0%', times: simTimes, packets: simPkts, raw: '', min: Math.min(...simTimes), max: Math.max(...simTimes), avg: simTimes.reduce((a, b) => a + b, 0) / count, note: 'Simulated (serverless)' });
   }
   try {
-    const cmd = process.platform === 'win32' ? `ping -n ${count} ${target}` : `ping -c ${count} ${target}`;
+    const n = Math.min(Math.max(parseInt(count, 10) || 4, 1), 20);
+    const cmd = process.platform === 'win32' ? `ping -n ${n} ${target}` : `ping -c ${n} ${target}`;
     const { stdout } = await execAsync(cmd);
     const lines = stdout.split('\n');
     const packets = [];
@@ -154,6 +165,7 @@ app.get('/api/whois', (req, res) => {
 app.get('/api/traceroute', async (req, res) => {
   const { target } = req.query;
   if (!target) return res.status(400).json({ error: 'Target required' });
+  if (!isValidHost(target)) return res.status(400).json({ error: 'Target must be a hostname or IP address' });
   if (isServerless) return res.json({ target, hops: [], raw: '', note: 'Traceroute requires shell access — not available in serverless.' });
   try {
     const cmd = process.platform === 'win32' ? `tracert -d ${target}` : `traceroute -n ${target}`;
@@ -208,26 +220,29 @@ app.get('/api/ip-info', async (req, res) => {
 app.post('/api/mikrotik/test', async (req, res) => {
   const { host, port = 8728, username, password } = req.body;
   if (!host || !username || !password) return res.status(400).json({ error: 'Host, username, and password are required' });
+  if (!isValidHost(host)) return res.status(400).json({ error: 'Host must be a hostname or IP address' });
 
   const diagnostics = [];
   const addDiag = (phase, status, message, detail = null) => {
     diagnostics.push({ phase, status, message, detail });
   };
 
-  // Phase 1: Ping reachability
+  // Phase 1: Ping reachability — informational only. Plenty of RouterOS boxes
+  // drop ICMP while the API port answers fine, so a silent ping must not abort
+  // the check; the port test below is the real gate.
   try {
     if (isServerless) throw new Error('skip');
     const { stdout } = await execAsync(process.platform === 'win32' ? `ping -n 2 ${host}` : `ping -c 2 ${host}`);
-    if (!stdout.includes('TTL') && !stdout.includes('ttl') && !stdout.includes('time=') && !stdout.includes('time<')) {
-      addDiag('ping', 'fail', `Host ${host} is not reachable`, stdout?.substring(0, 400) || '');
-      return res.json({ success: false, diagnostics, message: 'NETWORK FAIL - Host unreachable', details: `The IP ${host} did not respond to ping. Check: (1) Powered on? (2) IP correct? (3) Same network?` });
+    if (!/ttl[=:]|time[=<]/i.test(stdout)) {
+      addDiag('ping', 'warn', `${host} did not answer ICMP — continuing, the API may still be reachable`, stdout?.substring(0, 400) || '');
+    } else {
+      addDiag('ping', 'pass', `Host ${host} is reachable`);
     }
-    addDiag('ping', 'pass', `Host ${host} is reachable`);
   } catch (e) {
     if (isServerless || e.message === 'skip') {
       addDiag('ping', 'pass', `Skipped ping (serverless) — trying direct TCP connection`);
     } else {
-      return res.json({ success: false, diagnostics, message: 'NETWORK FAIL - Host unreachable', details: `The IP ${host} did not respond to ping. Check: (1) Powered on? (2) IP correct? (3) Same network?` });
+      addDiag('ping', 'warn', `${host} did not answer ICMP — continuing, the API may still be reachable`);
     }
   }
 
@@ -425,26 +440,27 @@ function bufferToStr(buf) {
 app.post('/api/snmp/check', async (req, res) => {
   const { host, community = 'public', port = 161, version = '2c' } = req.body;
   if (!host) return res.status(400).json({ error: 'Host is required' });
+  if (!isValidHost(host)) return res.status(400).json({ error: 'Host must be a hostname or IP address' });
 
   const diagnostics = [];
   const addDiag = (phase, status, message, detail = null) => {
     diagnostics.push({ phase, status, message, detail });
   };
 
-  // Phase 1: Ping
+  // Phase 1: Ping — informational; a device that drops ICMP can still answer SNMP.
   try {
     if (!isServerless) {
       const { stdout } = await execAsync(process.platform === 'win32' ? `ping -n 2 ${host}` : `ping -c 2 ${host}`);
-      if (!stdout.includes('TTL') && !stdout.includes('ttl') && !stdout.includes('time=') && !stdout.includes('time<')) {
-        addDiag('ping', 'fail', `Host ${host} is not reachable`);
-        return res.json({ success: false, diagnostics, message: 'Host unreachable' });
+      if (!/ttl[=:]|time[=<]/i.test(stdout)) {
+        addDiag('ping', 'warn', `${host} did not answer ICMP — continuing, SNMP may still respond`);
+      } else {
+        addDiag('ping', 'pass', `Host ${host} is reachable`);
       }
-      addDiag('ping', 'pass', `Host ${host} is reachable`);
     } else {
       addDiag('ping', 'pass', `Skipped ping (serverless) — trying SNMP directly`);
     }
   } catch {
-    return res.json({ success: false, diagnostics, message: 'Host unreachable' });
+    addDiag('ping', 'warn', `${host} did not answer ICMP — continuing, SNMP may still respond`);
   }
 
   // Phase 2: SNMP connection

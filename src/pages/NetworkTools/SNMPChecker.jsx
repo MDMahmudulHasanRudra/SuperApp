@@ -272,7 +272,10 @@ export default function SNMPChecker() {
                 {PHASES.map(p => {
                   const d = result.diagnostics.find(x => x.phase === p.key);
                   const status = d?.status || 'pending';
-                  const color = status === 'pass' ? '#34d399' : status === 'fail' ? '#f87171' : '#6b7280';
+                  // 'warn' (an unanswered ping) is not a failure — the check carries on.
+                  const color = status === 'pass' ? '#34d399'
+                    : status === 'warn' ? '#fbbf24'
+                    : status === 'fail' ? '#f87171' : '#6b7280';
                   return (
                     <div key={p.key} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', borderRadius: 8, background: `${color}08`, border: `1px solid ${color}15` }}>
                       <span>{p.icon}</span>
